@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 from scipy.stats import norm
+import h5py
 
 
 TARGET_COLS   = ['planet_temp', 'log_H2O', 'log_CO2', 'log_CH4', 'log_CO', 'log_NH3']
@@ -51,12 +52,10 @@ def _score_split(y_true: np.ndarray, mu: np.ndarray, std: np.ndarray) -> dict:
     mean_spread = float(std.mean())
 
     return {
-        "skill_score":         skill_score,
+        "score":         skill_score,
         "mean_crps":           float(crps.mean()),
         "crps_per_param":      crps_per_param,
-        "skill_per_param":     skill_per_param,
-        "mean_spread":         mean_spread,
-        "overconfidence_flag": mean_spread < 0.05,
+        "score_per_param":     skill_per_param,
     }
 
 def compute_participant_score(y_true, mu, std) -> dict:
@@ -136,6 +135,22 @@ def array_to_submission(arr: np.ndarray, planet_ids=None) -> "pd.DataFrame":
     df = pd.DataFrame(arr, columns=TARGET_COLS)
     df.insert(0, "planet_ID", planet_ids)
     return df
+
+def load_spectral_data(spectral_data_path):
+    with h5py.File(spectral_data_path, "r") as h5f:
+        n_planets = len(h5f.keys())
+        noise_stack    = np.zeros((n_planets, 52))
+        spectrum_stack = np.zeros((n_planets, 52))
+
+        for i, planet in enumerate(h5f.keys()):
+            spectrum_stack[i] = h5f[planet]['instrument_spectrum'][:]
+            noise_stack[i]    = h5f[planet]['instrument_noise'][:]
+
+        first = next(iter(h5f.keys()))
+        wl_grid = h5f[first]['instrument_wlgrid'][:]
+        width   = h5f[first]['instrument_width'][:]
+
+    return spectrum_stack, noise_stack, wl_grid, width
 
 def style_ax(ax):
     ax.set_facecolor('#0d1117')
@@ -422,4 +437,80 @@ def plot_spectrum(planet_id, spectrum_stack, noise_stack, wl_grid, y_true=None):
              f'mean SNR {mean_snr:.1f}  |  peak at {peak_wl:.2f} μm',
              ha='right', va='top', fontsize=8, color='#8b949e', style='italic')
 
+    plt.show()
+
+def plot_population_overview(spectrum_stack, noise_stack, wl_grid,
+                              n_planets=1000):
+    """
+    Population-level overview of the first n_planets spectra and,
+    optionally, the distribution of their atmospheric parameters.
+
+    Parameters
+    ----------
+    spectrum_stack : np.ndarray, shape (n_planets, n_channels)
+    noise_stack    : np.ndarray, shape (n_planets, n_channels)
+    wl_grid        : np.ndarray, shape (n_channels,)
+    n_planets      : int, default 1000
+    """
+
+    TARGET_COLS  = ['planet_temp', 'log_H2O', 'log_CO2', 'log_CH4', 'log_CO', 'log_NH3']
+    ABUN_LABELS  = ['Temperature (K)', 'log H₂O', 'log CO₂', 'log CH₄', 'log CO', 'log NH₃']
+    COLORS       = ['#e3b341', '#58a6ff', '#58a6ff', '#58a6ff', '#58a6ff', '#58a6ff']
+
+    n          = min(n_planets, spectrum_stack.shape[0])
+    specs      = spectrum_stack[:n]
+    errs       = noise_stack[:n]
+    mean_noise = errs.mean(axis=0)
+
+    # --- layout -----------------------------------------------------------
+
+    fig = plt.figure(figsize=(14, 7))
+    fig.patch.set_facecolor('#0d1117')
+    gs  = gridspec.GridSpec(
+        2, 1, height_ratios=[4, 1], hspace=0.08,
+        left=0.08, right=0.97, top=0.93, bottom=0.10
+    )
+    ax_spec  = fig.add_subplot(gs[0])
+    ax_noise = fig.add_subplot(gs[1], sharex=ax_spec)
+
+    def style_ax(ax):
+        ax.set_facecolor('#0d1117')
+        ax.tick_params(colors='#8b949e', labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#21262d')
+        ax.grid(True, which='major', linestyle='-',
+                linewidth=0.4, color='#21262d', alpha=0.8)
+
+    def set_log_xaxis(ax):
+        ax.set_xscale('log')
+        ax.xaxis.set_major_locator(LogLocator(base=10, numticks=8))
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda x, _: f'{x:.1f}' if x < 10 else f'{int(x)}'))
+        ax.xaxis.set_minor_formatter(NullFormatter())
+
+    # --- spectrum panel ---------------------------------------------------
+    style_ax(ax_spec)
+
+    for i in range(min(n, 100)):
+        ax_spec.plot(wl_grid, specs[i], color='#58a6ff',
+                     linewidth=0.4, alpha=0.2)
+
+    set_log_xaxis(ax_spec)
+    ax_spec.set_ylabel('Transit Depth (Rp/Rs)²', color='#8b949e', fontsize=10)
+    plt.setp(ax_spec.get_xticklabels(), visible=False)
+
+    # --- noise panel ------------------------------------------------------
+    style_ax(ax_noise)
+    noise_p16, noise_p84 = np.percentile(errs, 16, axis=0), np.percentile(errs, 84, axis=0)
+    ax_noise.fill_between(wl_grid, noise_p16, noise_p84,
+                          color='#3fb950', alpha=0.25, linewidth=0)
+    ax_noise.plot(wl_grid, mean_noise, color='#3fb950',
+                  linewidth=1.0, label='Mean noise')
+    set_log_xaxis(ax_noise)
+    ax_noise.set_ylabel('Noise', color='#8b949e', fontsize=8)
+    ax_noise.set_xlabel('Wavelength (μm)', color='#8b949e', fontsize=10)
+
+
+    fig.suptitle(f'Population overview  —  first {n} planets',
+                 color='#e6edf3', fontsize=12, y=0.97)
     plt.show()
